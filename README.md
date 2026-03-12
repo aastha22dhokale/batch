@@ -1,913 +1,1353 @@
-package com.ing.datadist.service;
+old::
+package com.ing.datadist.batch.config;
 
-import com.ing.datadist.dao.FileIngestionDAO;
-import com.ing.datadist.domain.FileIngestionDomain;
-import com.ing.datadist.enums.FileIngestionStatus;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Service;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.util.UUID;
-
-@Slf4j
-@Service
-public class FileIngestionService {
-
-    private final FileIngestionDAO fileIngestionDAO;
-
-    public FileIngestionService(FileIngestionDAO fileIngestionDAO) {
-        this.fileIngestionDAO = fileIngestionDAO;
-    }
-
-    /**
-     * Register a new file for ingestion
-     */
-    public String registerFileIngestion(String fileName, String flowName, String flowType,
-                                       String sourceSystem, String frequency, Long totalRecords) {
-        try {
-            FileIngestionDomain fileIngestion = new FileIngestionDomain();
-            String fileId = generateFileId();
-
-            fileIngestion.setFileId(fileId);
-            fileIngestion.setFileName(fileName);
-            fileIngestion.setFlowName(flowName);
-            fileIngestion.setFlowType(flowType);
-            fileIngestion.setSourceSystem(sourceSystem);
-            fileIngestion.setFrequency(frequency);
-            fileIngestion.setStatus(FileIngestionStatus.TO_BE_PROCESSED.getValue());
-            fileIngestion.setTotalRecords(totalRecords != null ? totalRecords : 0L);
-            fileIngestion.setProcessedRecords(0L);
-            fileIngestion.setFailedRecords(0L);
-            fileIngestion.setSkippedRecords(0L);
-            fileIngestion.setRetryCount(0);
-            fileIngestion.setCreatedBy("DD_SYSTEM");
-
-            fileIngestionDAO.insertFileIngestion(fileIngestion);
-            log.info("File Ingestion Service: Registered file - fileId: {}, fileName: {}, flowName: {}, totalRecords: {}",
-                    fileId, fileName, flowName, totalRecords);
-
-            return fileId;
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error registering file - fileName: {}, error: {}",
-                    fileName, e.getMessage());
-            throw new RuntimeException("Failed to register file ingestion", e);
-        }
-    }
-
-    /**
-     * Update file status to IN_PROGRESS
-     */
-    public void markFileProcessingStart(String fileId, String batchId) {
-        try {
-            fileIngestionDAO.updateProcessingStart(fileId, batchId);
-            log.info("File Ingestion Service: Marked processing start - fileId: {}, batchId: {}", fileId, batchId);
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error marking processing start - fileId: {}, error: {}",
-                    fileId, e.getMessage());
-            throw new RuntimeException("Failed to mark file processing start", e);
-        }
-    }
-
-    /**
-     * Update file status to COMPLETED with metrics
-     */
-    public void markFileProcessingComplete(String fileId,
-                                           Long totalRecords,
-                                           Long processedRecords,
-                                           Long failedRecords,
-                                           Long fileSize,
-                                           String fileChecksum) {
-
-        fileIngestionDAO.updateFileProcessingEnd(
-                fileId,
-                fileSize,
-                fileChecksum,
-                totalRecords,
-                processedRecords,
-                failedRecords
-        );
-
-        log.info("File Ingestion: COMPLETE - fileId={}, total={}, processed={}, failed={}",
-                fileId, totalRecords, processedRecords, failedRecords);
-    }
-    /**
-     * Update file processing metrics during processing
-     */
-    public void updateFileProcessingMetrics(String fileId, Long processedRecords, Long failedRecords, Long skippedRecords) {
-        try {
-            fileIngestionDAO.updateFileMetrics(fileId, processedRecords, failedRecords, skippedRecords);
-            log.info("File Ingestion Service: Updated processing metrics - fileId: {}, processed: {}, failed: {}, skipped: {}",
-                    fileId, processedRecords, failedRecords, skippedRecords);
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error updating processing metrics - fileId: {}, error: {}",
-                    fileId, e.getMessage());
-            throw new RuntimeException("Failed to update file processing metrics", e);
-        }
-    }
-
-    /**
-     * Mark file as FAILED with error message
-     */
-    public void markFileProcessingFailed(String fileId, String errorMessage) {
-
-        fileIngestionDAO.updateFileIngestionStatus(
-                fileId,
-                FileIngestionStatus.FAILED.getValue(),
-                null,       // keep TOTAL_RECORDS
-                null,       // keep PROCESSED_RECORDS
-                null,       // keep FAILED_RECORDS
-                errorMessage
-        );
-
-        log.info("File Ingestion Service: Marked processing failed - fileId: {}, error: {}",
-                fileId, errorMessage);
-    }    /**
-     * Update file processing end with file metadata and final metrics
-     */
-    public void updateFileProcessingEnd(String fileId, Long fileSize, String fileChecksum,
-                                       Long totalRecords, Long processedRecords, Long failedRecords) {
-        try {
-            fileIngestionDAO.updateFileProcessingEnd(fileId, fileSize, fileChecksum,
-                    totalRecords, processedRecords, failedRecords);
-            log.info("File Ingestion Service: Updated processing end - fileId: {}, fileSize: {}, " +
-                    "fileChecksum: {}, totalRecords: {}, processedRecords: {}, failedRecords: {}",
-                    fileId, fileSize, fileChecksum, totalRecords, processedRecords, failedRecords);
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error updating processing end - fileId: {}, error: {}",
-                    fileId, e.getMessage());
-            throw new RuntimeException("Failed to update file processing end", e);
-        }
-    }
-
-    /**
-     * Get file ingestion record by fileId
-     */
-    public FileIngestionDomain getFileIngestion(String fileId) {
-        try {
-            return fileIngestionDAO.getFileIngestionByFileId(fileId);
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error retrieving file ingestion - fileId: {}, error: {}",
-                    fileId, e.getMessage());
-            throw new RuntimeException("Failed to retrieve file ingestion", e);
-        }
-    }
-
-    /**
-     * Generate unique file ID
-     */
-    private String generateFileId() {
-        return "FILE_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
-    }
-    public void updateTotalNumberOfRecords(String fileId, Resource resource) {
-        try {
-            long totalRecords = 0L;
-            long fileSize = resource.contentLength();
-
-            // Try to read the last line and parse it as a number (footer count)
-            String lastLine;
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(resource.getInputStream()))) {
-                String line;
-                String tmp = null;
-                while ((line = br.readLine()) != null) {
-                    tmp = line;
-                }
-                lastLine = tmp;
-            }
-
-            if (lastLine != null) {
-                String cleaned = lastLine.replace(",", "").replace("\"", "").trim();
-                if (!cleaned.isEmpty() && cleaned.matches("^[0-9]+$")) {
-                    totalRecords = Long.parseLong(cleaned);
-                    log.info("File Ingestion Service: footer-based totalRecords detected: {} (fileId: {})", totalRecords, fileId);
-                }
-            }
-
-            // Fallback if no numeric footer found: count data rows
-            if (totalRecords == 0L) {
-                long lines = 0L;
-                long numericLikeLines = 0L;
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(resource.getInputStream()))) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        lines++;
-                        String cleaned = line.replace(",", "").replace("\"", "").trim();
-                        if (cleaned.matches("^[0-9]+$")) {
-                            numericLikeLines++;
-                        }
-                    }
-                }
-                // lines = header + data + possible numeric-like lines (footer or stray)
-                // data = lines - header(1) - numericLikeLines
-                totalRecords = Math.max(lines - 1 - numericLikeLines, 0L);
-                log.info("File Ingestion Service: counted totalRecords without footer: {} (lines={}, numericLikeLines={}, fileId={})",
-                        totalRecords, lines, numericLikeLines, fileId);
-            }
-
-            fileIngestionDAO.updateTotalNumberOfRecords(fileId, totalRecords, fileSize);
-
-        } catch (Exception e) {
-            log.error("File Ingestion Service: Error while updating TotalNumberOfRecords - fileId: {}, error: {}",
-                    fileId, e.getMessage(), e);
-        }
-    }
-}
-package com.ing.datadist.batch.schedular;
-
+import com.ing.datadist.batch.processor.*;
+import com.ing.datadist.batch.processor.OrganisationUnitEnrichmentProcessor;
+import com.ing.datadist.batch.tasklet.LEDeletionApiTasklet;
+import com.ing.datadist.batch.tasklet.OrganisationSearchApiTasklet;
+import com.ing.datadist.batch.tasklet.OrganisationUnitSearchApiTasklet;
+import com.ing.datadist.dao.LegalEntityDeletionDAO;
+import com.ing.datadist.dao.MappingDAO;
+import com.ing.datadist.dao.queries.IncapablesQueries;
 import com.ing.datadist.dao.ErrorLogDAO;
+import com.ing.datadist.domain.*;
+import com.ing.datadist.domain.fileinput.LegalEntityParent;
+import com.ing.datadist.domain.fileinput.OrganisationUnit;
+import com.ing.datadist.domain.incapables.IncapableRelationship;
+import com.ing.datadist.ecs.services.FileProviderService;
+import com.ing.datadist.retention.config.DataRetentionConfig;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.database.JdbcBatchItemWriter;
+import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
+import org.springframework.transaction.PlatformTransactionManager;
 import com.ing.datadist.enums.ErrorType;
 import com.ing.datadist.enums.RecordType;
 import com.ing.datadist.service.FileIngestionService;
-import com.ing.datadist.util.CsvTotalRecordsParser;
-import com.ing.datadist.util.FileUtility;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.batch.core.Job;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobParameters;
-import org.springframework.batch.core.JobParametersBuilder;
-import org.springframework.batch.core.explore.JobExplorer;
-import org.springframework.batch.core.launch.JobLauncher;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.time.LocalDateTime;
-import java.util.concurrent.atomic.AtomicBoolean;
+import javax.sql.DataSource;
+
+import static com.ing.datadist.batch.config.BatchConstants.*;
+import static com.ing.datadist.domain.fileinput.Incapables.*;
+import static com.ing.datadist.domain.fileinput.LegalEntityChild.*;
+import static com.ing.datadist.domain.fileinput.LegalEntityParent.*;
+import static com.ing.datadist.domain.fileinput.OrganisationUnit.*;
 
 @Slf4j
-@Component
-public class BatchSchedular {
+@Configuration
+public class BatchJobConfig {
 
-    private final JobLauncher jobLauncher;
-    private final Job cofaceOUjob;
-    private final Job cofaceLEJob;
-    private final Job incapablesJob;
-    private final Job leDeletionJob;
-    private final JobExplorer jobExplorer;
-    private final ErrorLogDAO errorLogDAO;
-    private final FileIngestionService fileIngestionService;
-    private final AtomicBoolean organisationUnitBatchRunning = new AtomicBoolean(false);
-    private final AtomicBoolean legalEntityBatchRunning = new AtomicBoolean(false);
-    private final AtomicBoolean incapablesBatchRunning = new AtomicBoolean(false);
-    private final AtomicBoolean leDeletionBatchRunning = new AtomicBoolean(false);
-    Boolean runFlagOU = true;
-    Boolean runFlagLE = true;
-    Boolean runFlagIncapables = true;
-    Boolean runFlagLEDeletion = true;
+    private static final String COFACE_OPS_TABLE_INSERT_SQL =
+            "INSERT INTO DD_COFACEOPS_TBL (OPS_UUID, OPS_NUMBER, ORG_UUID, ORG_NUMBER, OPS_ORGANISATIONUNITNAME, " +
+                    "ADDRESS, ADR_POSTALADDRESS_STREETNM, ADR_POSTALADDRESS_HOUSENUM, ADR_POSTALADDRESS_HOUSEADD, " +
+                    "ADR_POSTALADDRESS_POSTALCD, ADR_POSTALADDRESS_CITYNAME, ADR_POSTALADDRESS_CNTRYCD, " +
+                    "OPS_EXTID_DATEOFISSUE, OPS_EXTID_EXPIRYDATE, " +
+                    "ADR_DIGITALADDR_FULLTEL, ADR_DIGITALADDR_FULLTELFGN, ADR_DIGITALADDR_EMAIL, " +
+                    "FILE_ID) " +
+                    "VALUES (:opsUUID, :opsExternalIdentifierVal, :orgUUID, :orgExternalIdentifierVal, :organisationUnitName, " +
+                    ":address, :postalAddressStreetNm, :postalAddressHouseNum, :postalAddressHouseAdd, " +
+                    ":postalAddressPostalCd, :postalAddressCityName, :postalAddressCntryCd, " +
+                    ":opsExtIdDateOfIssue, :opsExtIdExpiryDate, " +
+                    ":digitalAddrFullTel, :digitalAddrFullTefgn, :digitalAddrEmail, " +
+                    ":fileId)";
+    private final static String IP_EXTERNAL_VAL = "OPS_ExternalIdentifier_Val";
+    private final static String LE_EXTERNAL_VAL = "LE_ExternalIdentifier_Val";
+    private final static String OU_ORGANISATIOIN_UNITNAME = "OPS_OrganisationUnitName";
+    private final static String ADDRESS = "ADDRESS";
+    private final static String ADR_POSTALADDRESS_STREETNM = "Adr_PostalAddress_StreetNm";
+    private final static String ADR_POSTALADDRESS_HOUSENUM = "Adr_PostalAddress_HouseNum";
+    private final static String ADR_POSTALADDRESS_HOUSEDD = "Adr_PostalAddress_HouseAdd";
+    private final static String ADR_POSTALADDRESS_POSTALCD = "Adr_PostalAddress_PostalCd";
+    private final static String ADR_POSTALADDRESS_CITYNAME = "Adr_PostalAddress_CityName";
+    private final static String ADR_POSTALADDRESS_CNTRYCD = "Adr_PostalAddress_CntryCd";
+    private final static String IP_EXTID_DATEOFISSUE = "IP_ExtId_DateOfIssue";
+    private final static String IP_EXTId_EXPIRYDATE = "IP_ExtId_ExpiryDate";
+    private final static String ADR_DIGITALADDR_FULLTEL = "ADR_Digitaladdr_Fulltel";
+    private final static String ADR_DIGITALADDR_FULLTELFGN = "Adr_Digitaladdr_Fulltelgn";
+    private final static String ADR_DIGITALADDR_EMAIL = "Adr_DigitalAddr_Email";
+    private final static String COFACE_OPS_BATCH_FILE_READER_NAME = "organisationUnitReader";
+    private final static String COFACE_OPS_BATCH_STEP_NAME = "organisationUnitEnrichmentStep";
+    private final static String COFACE_OPS_BATCH_JOB_NAME = "organisationUnitEnrichmentJob";
+    private final static String COFACE_LE_BATCH_JOB_NAME = "LegalEntityEnrichmentJob";
+    private final static String COFACE_LE_BATCH_FILE_READER_NAME = "organisationReader";
+    private final static String COFACE_LE_BATCH_PARENT_FILE_READER_NAME = "legalEntityParentReader";
+    private final static String COFACE_LE_BATCH_CHILD_FILE_READER_NAME = "legalEntityChildReader";
+    String LEGAL_ENTITY_PARENT_TABLE_INSERT_SQL =
+            "INSERT INTO DD_LEGAL_ENTITY_PARENT_TBL (" +
+                    "DD_UUID, ORG_STATUS, ORG_NAME, ORG_OTHER_NAME, ORG_OTHER_NAME_TYPE, " +
+                    "ADR_UNSTRUCTURED_ADDRESS, ADR_POSTALADDRESS_STREETNM, ADR_POSTALADDRESS_HOUSENUM, " +
+                    "ADR_POSTALADDRESS_HOUSEADD, ADR_POSTALADDRESS_POSTALCD, ADR_POSTALADDRESS_CITYNAME, " +
+                    "ADR_POSTALADDRESS_CNTRYCD, ORG_LEGAL_FORM, ORG_BUSINESS_CLOSE_DOWN_DATE, " +
+                    "LE_LEGAL_STATUS, ORG_DATE_OF_FOUNDATION, LE_PREFERRED_LANGUAGE, " +
+                    "ADR_DIGITALADDR_FULLTEL, NSSO_EXTL_IDENTIFIER, " +
+                    "ASMT_VAT_STATUS, NSSO_EXTL_IDENTIFIER_STATUS, " +
+                    "FILE_ID) " +
+                    "VALUES (" +
+                    ":orgUUID, :orgStatus, :orgName, :orgOtherName, :orgOtherNameType, " +
+                    ":adrUnstructuredAddress, :adrPostalAddressStreetName, :adrPostalAddressHouseNum, " +
+                    ":adrPostalAddressHouseNumAdd, :adrPostalAddressPostalCode, :adrPostalAddressCityName, " +
+                    ":adrPostalAddressCountryCode, :orgLegalForm, :orgBusinessClosedownDate, " +
+                    ":lELegalStatus, :asmtIdVerifyApprovalDate, :lEPreferredLanguage, " +
+                    ":adrDigitalAddrFullTel, :nssoExternalIdentifier, " +
+                    ":asmtVatStatus, :nssoExternalIdentifierStatus, " +
+                    ":fileId)";
+    String LEGAL_ENTITY_CHILD_TABLE_INSERT_SQL =
+            "INSERT INTO DD_LEGAL_ENTITY_CHILD_TBL (" +
+                    "DD_UUID, INDUSTRY_CLASS_CODE, INDUSTRY_CLASS_CODE_RANK, INDUSTRY_CLASS_EFF_DATE, INDUSTRY_CLASS_END_DATE, " +
+                    "FILE_ID) " +
+                    "VALUES (" +
+                    ":orgUUID, :industryClassCode, :industryClassRank, :industryClassEffDate, :industryClassEndDate, :fileId)";
 
-
-    @Value("${spring.batch.schedular.organisationUnitCron}")
-    private String organisationUnitCron;
-
-    @Value("${spring.batch.schedular.legalEntityCron}")
-    private String legalEntityCron;
-
-    @Value("${spring.batch.schedular.incapablesCron}")
-    private String incapablesCron;
-
-    @Value("${spring.batch.schedular.leDeletionCron:0 */5 * * * *}")
-    private String leDeletionCron;
-
-    @Value("${ecs.cofaceIncapablesFileName}")
-    private String cofaceIncapablesFileName;
-
+    @Autowired
+    FileProviderService fileProviderService;
+    @Autowired
+    private MappingDAO mappingDAO;
+    @Autowired
+    private ErrorLogDAO errorLogDAO;
+    @Autowired
+    private TaskletCofaceOpsDomainWrapper taskletCofaceOpsDomainWrapper;
+    @Autowired
+    private TaskletCofaceParentDomainWrapper taskletCofaceParentDomainWrapper;
+    @Autowired
+    private TaskletCofaceChildDomainWrapper taskletCofaceChildDomainWrapper;
+    @Autowired
+    private TaskletLeDeletionDomainWrapper taskletLeDeletionDomainWrapper;
+    @Autowired
+    private LegalEntityDeletionDAO legalEntityDeletionDAO;
+    @Autowired
+    private FileIngestionService fileIngestionService;
+    @Value("${ecs.bucketName}")
+    private String bucketName;
     @Value("${ecs.cofaceOUFileName}")
     private String cofaceOUFileName;
-
     @Value("${ecs.cofaceLEParentFileName}")
     private String cofaceLEParentFileName;
-
     @Value("${ecs.cofaceLEChildFileName}")
     private String cofaceLEChildFileName;
-
+    @Value("${ecs.cofaceIncapablesFileName}")
+    private String cofaceIncapablesFileName;
     @Value("${ecs.cofaceLEDeleteFileName:COFACE_LE_DEL.csv}")
     private String cofaceLEDeleteFileName;
-
     @Value("${ecs.readFileFrom}")
     private String readFileFrom;
+    @Value("${app.input-file}")
+    private Resource resourceOUFile;
+    @Value("${app.le-parent-file}")
+    private Resource resourceLEParentFile;
+    @Value("${app.le-child-file}")
+    private Resource resourceLEChildFile;
+    @Value("${app.incapables-file}")
+    private Resource resourceIncapablesFile;
+    @Value("${app.le-delete-file:classpath:COFACE_LE_DEL.csv}")
+    private Resource resourceLEDeleteFile;
 
-
-    public BatchSchedular(JobLauncher jobLauncher,
-                          @Qualifier("organisationUnitEnrichmentJob") Job job,
-                          @Qualifier("LegalEntityEnrichmentJob") Job cofaceLEJob,
-                          @Qualifier("IncapablesEnrichmentJob") Job incapablesJob,
-                          @Qualifier("LegalEntityDeletionJob") Job leDeletionJob,
-                          JobExplorer jobExplorer, ErrorLogDAO errorLogDAO, FileIngestionService fileIngestionService) {    this.jobLauncher = jobLauncher;
-        this.cofaceOUjob = job;
-        this.cofaceLEJob = cofaceLEJob;
-        this.incapablesJob = incapablesJob;
-        this.leDeletionJob = leDeletionJob;
-        this.jobExplorer = jobExplorer;
-        this.errorLogDAO = errorLogDAO;
-        this.fileIngestionService = fileIngestionService;
+    @Bean
+    @StepScope
+    public FlatFileItemReader<OrganisationUnitDomain> organisationUnitReader() {
+        String fileId = StepSynchronizationManager.getContext().getStepExecution()
+                .getJobParameters().getString("opsFileId");
+        return new FlatFileItemReaderBuilder<OrganisationUnitDomain>()
+                .name(COFACE_OPS_BATCH_FILE_READER_NAME)
+                .resource(getFileForLocalRun(readFileFrom, cofaceOUFileName,fileId))
+                .delimited()
+                .names(OrganisationUnit.LE_EXTERNAL_IDENTIFIER, OPS_EXTERNAL_IDENTIFIER_VAL, ORGANISATION_UNIT_NAME,
+                        ADDRESS, UNIT_POSTAL_ADDRESS_STREET_NM, UNIT_POSTAL_ADDRESS_HOUSE_NUM,
+                        UNIT_POSTAL_ADDRESS_HOUSE_ADD, UNIT_POSTAL_ADDRESS_POSTAL_CD,
+                        UNIT_POSTAL_ADDRESS_CITY_NAME, UNIT_POSTAL_ADDRESS_CNTRY_CD,
+                        OPS_EXT_ID_DATE_OF_ISSUE, OPS_EXT_ID_EXPIRY_DATE,
+                        UNIT_DIGITAL_ADDR_FULL_TEL, UNIT_DIGITAL_ADDR_FULL_TEFGN,
+                        UNIT_DIGITAL_ADDR_EMAIL)
+                .fieldSetMapper(new OrganisationUnitFieldSetMapper())
+                .linesToSkip(1)
+                .build();
     }
 
-    @Scheduled(cron = "${spring.batch.schedular.organisationUnitCron}")
-    public void run() {
-        log.info("OrganisationUnit Batch Schedular started:{}", LocalDateTime.now());
-        JobExecution execution = null;
-        String fileId = null;
-        String fileName = null;
-
-        if (!organisationUnitBatchRunning.compareAndSet(false, true)) {
-            log.info("OrganisationUnit Batch still running, skipping this run :{}", LocalDateTime.now());
-            return;
-        }
-        if (runFlagOU) {
-            try {
-                log.info("OrganisationUnit Batch Schedular cron:{} started:{}", organisationUnitCron, LocalDateTime.now());
-
-                // Fetch file name from configuration
-                fileName = cofaceOUFileName;
-                String filePath = buildFilePath(fileName);
-
-                // Calculate total records from CSV file BEFORE registration
-
-                Long ouTotalRecords = CsvTotalRecordsParser.getTotalRecordsFromCsv(filePath);
-                Long ouFileSize = CsvTotalRecordsParser.getFileSizeInBytes(filePath);
-
-                log.info("OrganisationUnit File: {} - Total records from file: {}, File size: {}",
-                        fileName, ouTotalRecords, ouFileSize);
-
-                fileId = fileIngestionService.registerFileIngestion(
-                        fileName,
-                        "COFACE_OPS",
-                        "OPS",
-                        "COFACE_SYSTEM",
-                        "DAILY",
-                        ouTotalRecords
-                );
-
-                JobParameters jobParameters = new JobParametersBuilder(jobExplorer)
-                        .addLong("run.id", System.currentTimeMillis())
-                        .addString("opsFileId", fileId)
-                        .addString("fileName", fileName)
-                        .toJobParameters();
-
-                // Mark file processing start
-                fileIngestionService.markFileProcessingStart(fileId, String.valueOf(System.currentTimeMillis()));
-
-                execution = jobLauncher.run(cofaceOUjob, jobParameters);
-
-                // Update file processing completion based on execution status
-                String fileChecksum = FileUtility.calculateMD5Checksum(filePath);
-                String formattedSize = FileUtility.formatFileSize(ouFileSize);
-
-                if (execution.getStatus().toString().equals("COMPLETED")) {
-                    // Get record counts from job execution context
-                    Long totalRecords = getTotalRecordsFromExecution(execution);
-                    Long processedRecords = getProcessedRecordsFromExecution(execution);
-                    Long failedRecords = getFailedRecordsFromExecution(execution);
-
-                    // If execution context doesn't have counts, use parsed value for total
-                    if (totalRecords == 0L && ouTotalRecords > 0L) {
-                        totalRecords = ouTotalRecords;
-                    }
-
-                    // For successful completion, if processedRecords is 0, assume all records were processed
-                    if (processedRecords == 0L && totalRecords > 0L) {
-                        processedRecords = totalRecords;
-                    }
-
-                    // If no failures logged, set to 0
-                    if (failedRecords == null) {
-                        failedRecords = 0L;
-                    }
-
-                    log.info("OrganisationUnit Batch completed - fileSize: {}, fileChecksum: {}, totalRecords: {}, processedRecords: {}, failedRecords: {}",
-                            formattedSize, fileChecksum, totalRecords, processedRecords, failedRecords);
-
-                    fileIngestionService.updateFileProcessingEnd(fileId, ouFileSize, fileChecksum,
-                            totalRecords, processedRecords, failedRecords);
-                } else {
-                    String errorMsg = "Batch execution failed with status: " + execution.getStatus();
-                    log.error("OrganisationUnit Batch failed: {}", errorMsg);
-                    fileIngestionService.markFileProcessingFailed(fileId, errorMsg);
-                }
-            } catch (Exception e) {
-                log.error("Exception in OrganisationUnit Batch Schedular", e);
-
-                // Log to DD_ERROR_LOG table
-                try {
-                    StringWriter sw = new StringWriter();
-                    e.printStackTrace(new PrintWriter(sw));
-                    errorLogDAO.logError(
-                            RecordType.ORGANISATION_UNIT,
-                            "BATCH_JOB",
-                            null,
-                            ErrorType.PARSING_ERROR,
-                            "Batch Scheduler Exception: " + e.getMessage(),
-                            null,
-                            fileName,
-                            sw.toString(),
-                            fileId  // File ID
-                    );
-                } catch (Exception logEx) {
-                    log.error("Failed to log batch scheduler error", logEx);
-                }
-
-                // Mark file as failed
-                if (fileId != null) {
-                    try {
-                        fileIngestionService.markFileProcessingFailed(fileId, "Exception in batch scheduler: " + e.getMessage());
-                    } catch (Exception fileEx) {
-                        log.error("Failed to mark file as failed", fileEx);
-                    }
-                }
-            } finally {
-                if (execution != null) {
-                    log.info("OrganisationUnit Batch Schedular finished name:{} status:{}", cofaceOUjob.getName(), execution.getStatus());
-                } else {
-                    log.info("OrganisationUnit Batch Schedular failed name:{}", cofaceOUjob.getName());
-                }
-                organisationUnitBatchRunning.set(false);
-            }
-        }else{
-            log.info("OrganisationUnit Batch Schedular flag stopped");
-        }
-        runFlagOU =  false;
+    @Bean
+    public OrganisationUnitEnrichmentProcessor organisationUnitProcessor() {
+        return new OrganisationUnitEnrichmentProcessor(mappingDAO, taskletCofaceOpsDomainWrapper);
     }
 
-    @Scheduled(cron = "${spring.batch.schedular.legalEntityCron}")
-    public void runLE() {
-        log.info("LegalEntity Batch Schedular started:{}", LocalDateTime.now());
-        JobExecution execution = null;
-        String parentFileId = null;
-        String childFileId = null;
-        String parentFileName = null;
-        String childFileName = null;
 
-        if (!legalEntityBatchRunning.compareAndSet(false, true)) {
-            log.info("LegalEntity Batch still running, skipping this run :{}", LocalDateTime.now());
-            return;
-        }
-        if(runFlagLE) {
-            try {
-                log.info("LegalEntity Batch Schedular cron:{} started:{}", legalEntityCron, LocalDateTime.now());
-
-                // Fetch PARENT file name from configuration
-                parentFileName = cofaceLEParentFileName;
-                String parentFilePath = buildFilePath(parentFileName);
-
-                Long parentTotalRecords = CsvTotalRecordsParser.getTotalRecordsFromCsv(parentFilePath);
-                Long parentFileSize = CsvTotalRecordsParser.getFileSizeInBytes(parentFilePath);
-
-                parentFileId = fileIngestionService.registerFileIngestion(
-                        parentFileName,
-                        "COFACE_LE_PARENT",
-                        "LE",
-                        "COFACE_SYSTEM",
-                        "DAILY",
-                        parentTotalRecords
-                );
-
-                // Fetch CHILD file name from configuration
-                childFileName = cofaceLEChildFileName;
-                String childFilePath = buildFilePath(childFileName);
-
-                Long childTotalRecords = CsvTotalRecordsParser.getTotalRecordsFromCsv(childFilePath);
-                Long childFileSize = CsvTotalRecordsParser.getFileSizeInBytes(childFilePath);
-
-                childFileId = fileIngestionService.registerFileIngestion(
-                        childFileName,
-                        "COFACE_LE_CHILD",
-                        "LE",
-                        "COFACE_SYSTEM",
-                        "DAILY",
-                        childTotalRecords
-                );
-
-                JobParameters jobParameters = new JobParametersBuilder(jobExplorer)
-                        .addLong("run.id", System.currentTimeMillis())
-                        .addString("leParentFileId", parentFileId)
-                        .addString("leChildFileId",  childFileId)
-                        .addString("leParentFileName", parentFileName)
-                        .addString("leChildFileName", childFileName)
-                        .toJobParameters();
-
-                // Mark file processing start
-                fileIngestionService.markFileProcessingStart(parentFileId, String.valueOf(System.currentTimeMillis()));
-                fileIngestionService.markFileProcessingStart(childFileId, String.valueOf(System.currentTimeMillis()));
-
-                execution = jobLauncher.run(cofaceLEJob, jobParameters);
-
-                // Update file processing completion based on execution status
-                String parentFileChecksum = FileUtility.calculateMD5Checksum(parentFilePath);
-                String parentFormattedSize = FileUtility.formatFileSize(parentFileSize);
-
-                String childFileChecksum = FileUtility.calculateMD5Checksum(childFilePath);
-                String childFormattedSize = FileUtility.formatFileSize(childFileSize);
-
-                if (execution.getStatus().toString().equals("COMPLETED")) {
-                    // Get record counts from job execution context
-                    Long totalRecords = getTotalRecordsFromExecution(execution);
-                    Long processedRecords = getProcessedRecordsFromExecution(execution);
-                    Long failedRecords = getFailedRecordsFromExecution(execution);
-
-                    // If execution context doesn't have counts, use parsed values
-                    if (totalRecords == 0L && parentTotalRecords > 0L) {
-                        totalRecords = parentTotalRecords;
-                    }
-
-                    // For successful completion, if processedRecords is 0, assume all records were processed
-                    if (processedRecords == 0L && totalRecords > 0L) {
-                        processedRecords = totalRecords;
-                    }
-
-                    // If no failures logged, set to 0
-                    if (failedRecords == null) {
-                        failedRecords = 0L;
-                    }
-
-                    log.info("LegalEntity Batch completed - PARENT fileSize: {}, fileChecksum: {}, CHILD fileSize: {}, fileChecksum: {}, totalRecords: {}, processedRecords: {}, failedRecords: {}",
-                            parentFormattedSize, parentFileChecksum, childFormattedSize, childFileChecksum, totalRecords, processedRecords, failedRecords);
-
-                    fileIngestionService.updateFileProcessingEnd(parentFileId, parentFileSize, parentFileChecksum,
-                            totalRecords, processedRecords, failedRecords);
-                    fileIngestionService.updateFileProcessingEnd(childFileId, childFileSize, childFileChecksum,
-                            totalRecords, processedRecords, failedRecords);
-                } else {
-                    String errorMsg = "Batch execution failed with status: " + execution.getStatus();
-                    log.error("LegalEntity Batch failed: {}", errorMsg);
-                    fileIngestionService.markFileProcessingFailed(parentFileId, errorMsg);
-                    fileIngestionService.markFileProcessingFailed(childFileId, errorMsg);
-                }
-            } catch (Exception e) {
-                log.error("Exception in LegalEntity Batch Schedular", e);
-
-                // Log to DD_ERROR_LOG table
-                try {
-                    StringWriter sw = new StringWriter();
-                    e.printStackTrace(new PrintWriter(sw));
-
-                    errorLogDAO.logError(
-                            RecordType.ORGANISATION_PARENT,
-                            "BATCH_JOB",
-                            null,
-                            ErrorType.DATABASE_ERROR,
-                            "Batch Scheduler Exception: " + e.getMessage(),
-                            null,
-                            parentFileName,
-                            sw.toString(),
-                            parentFileId
-                    );
-                } catch (Exception logEx) {
-                    log.error("Failed to log batch scheduler error", logEx);
-                }
-
-                // Mark files as failed
-                if (parentFileId != null) {
-                    try {
-                        fileIngestionService.markFileProcessingFailed(parentFileId, "Exception in batch scheduler: " + e.getMessage());
-                    } catch (Exception fileEx) {
-                        log.error("Failed to mark parent file as failed", fileEx);
-                    }
-                }
-                if (childFileId != null) {
-                    try {
-                        fileIngestionService.markFileProcessingFailed(childFileId, "Exception in batch scheduler: " + e.getMessage());
-                    } catch (Exception fileEx) {
-                        log.error("Failed to mark child file as failed", fileEx);
-                    }
-                }
-            } finally {
-                if (execution != null) {
-                    log.info("LegalEntity Batch Schedular finished name:{} status:{}", cofaceLEJob.getName(), execution.getStatus());
-                } else {
-                    log.info("LegalEntity Batch Schedular failed name:{}", cofaceLEJob.getName());
-                }
-                legalEntityBatchRunning.set(false);
-            }
-        }else{
-            log.info("LegalEntity Batch Schedular flag stopped");
-        }
-        runFlagLE =  false;
+    @Bean
+    public JdbcBatchItemWriter<OrganisationUnitDomainWrapper> organisationUnitWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<OrganisationUnitDomainWrapper>()
+                .sql(COFACE_OPS_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
     }
 
-    /**
-     * Extract total records processed from job execution context
-     */
-    private Long getTotalRecordsFromExecution(JobExecution execution) {
-        try {
-            Object totalRecords = execution.getExecutionContext().get("totalRecords");
-            return totalRecords != null ? Long.valueOf(totalRecords.toString()) : 0L;
-        } catch (Exception e) {
-            log.warn("Unable to retrieve totalRecords from job execution context", e);
-            return 0L;
-        }
+
+    @Bean
+    public Step organisationUnitEnrichmentStep(JobRepository jobRepository,
+                                               PlatformTransactionManager transactionManager,
+                                               FlatFileItemReader<OrganisationUnitDomain> organisationUnitReader,
+                                               OrganisationUnitEnrichmentProcessor organisationUnitProcessor,
+                                               JdbcBatchItemWriter<OrganisationUnitDomainWrapper> organisationUnitWriter) {
+        return new StepBuilder(COFACE_OPS_BATCH_STEP_NAME, jobRepository)
+                .<OrganisationUnitDomain, OrganisationUnitDomainWrapper>chunk(100, transactionManager)
+                .reader(organisationUnitReader())
+                .processor(organisationUnitProcessor)
+                .writer(organisationUnitWriter)
+                .listener((StepExecutionListener) organisationUnitProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        organisationUnitProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(Integer.MAX_VALUE)
+                .listener(new org.springframework.batch.core.listener.SkipListenerSupport<OrganisationUnitDomain, OrganisationUnitDomainWrapper>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        if (t instanceof FlatFileParseException) {
+                            FlatFileParseException ex = (FlatFileParseException) t;
+                            log.error("CSV Parsing error at line: {}, input: {}", ex.getLineNumber(), ex.getInput());
+
+                            try {
+                                errorLogDAO.logParsingError(
+                                        RecordType.ORGANISATION_UNIT,
+                                        "cofaceOpsData.csv",
+                                        "Parsing error at line: " + ex.getLineNumber() + ", input: " + ex.getInput(),
+                                        null,  // batchId
+                                        ex.toString(),  // stackTrace
+                                        null  // fileId
+                                );
+                            } catch (Exception logEx) {
+                                log.error("Failed to log parsing error", logEx);
+                            }
+                        }
+                    }
+                })
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
     }
 
-    /**
-     * Extract processed records from job execution context
-     */
-    private Long getProcessedRecordsFromExecution(JobExecution execution) {
-        try {
-            Object processedRecords = execution.getExecutionContext().get("processedRecords");
-            return processedRecords != null ? Long.valueOf(processedRecords.toString()) : 0L;
-        } catch (Exception e) {
-            log.warn("Unable to retrieve processedRecords from job execution context", e);
-            return 0L;
-        }
+    @Bean
+    public Step organisationUnitSearchApiTaskletStep(JobRepository jobRepository,
+                                                     PlatformTransactionManager transactionManager,
+                                                     OrganisationUnitSearchApiTasklet organisationUnitSearchApiTasklet) {
+        return new StepBuilder("organisationUnitSearchApiTaskletStep", jobRepository)
+                .tasklet(organisationUnitSearchApiTasklet, transactionManager)
+                .build();
     }
 
-    /**
-     * Extract failed records from job execution context
-     */
-    private Long getFailedRecordsFromExecution(JobExecution execution) {
-        try {
-            Object failedRecords = execution.getExecutionContext().get("failedRecords");
-            return failedRecords != null ? Long.valueOf(failedRecords.toString()) : 0L;
-        } catch (Exception e) {
-            log.warn("Unable to retrieve failedRecords from job execution context", e);
-            return 0L;
-        }
+    @Bean(name = "organisationUnitEnrichmentJob")
+
+    public Job enrichmentJob(JobRepository jobRepository, Step organisationUnitEnrichmentStep, Step organisationUnitSearchApiTaskletStep) {
+        return new JobBuilder(COFACE_OPS_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+
+
+                .start(organisationUnitEnrichmentStep)
+                .next(organisationUnitSearchApiTaskletStep)
+                .build();
     }
 
-    /**
-     * Build file path based on readFileFrom configuration
-     */
-    private String buildFilePath(String fileName) {
-        if ("RESOURCES".equals(readFileFrom)) {
-            return "src/main/resources/" + fileName;
-        } else if ("ECS".equals(readFileFrom)) {
-            // For ECS, return just the file name - it will be fetched from S3
-            return fileName;
+    // Legal Entity batch config start ----------------------------------------------------------------------------------------
+    @Bean
+    public Step organisationSearchApiTaskletStep(JobRepository jobRepository,
+                                                 PlatformTransactionManager transactionManager,
+                                                 OrganisationSearchApiTasklet organisationSearchApiTasklet) {
+        return new StepBuilder("organisationSearchApiTaskletStep", jobRepository)
+                .tasklet(organisationSearchApiTasklet, transactionManager)
+                .build();
+    }
+
+    @Bean
+    public Step legalEntityParentEnrichStep(JobRepository jobRepository,
+                                            PlatformTransactionManager transactionManager,
+                                            FlatFileItemReader<LegalEntityParentDomain> legalEntityParentReader,
+                                            LEParentEnrichmentProcessor leParentEnrichmentProcessor,
+                                            JdbcBatchItemWriter<LegalEntityParentDomain> legalEntityParentWriter) {
+
+        return new StepBuilder(COFACE_LE_BATCH_PARENT_STEP_NAME, jobRepository)
+                .<LegalEntityParentDomain, LegalEntityParentDomain>chunk(100, transactionManager)
+                .reader(legalEntityParentReader())
+                .processor(leParentEnrichmentProcessor)
+                .writer(legalEntityParentWriter)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        leParentEnrichmentProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(100)
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
+    }
+
+    @Bean
+    public LegalEntityChildEnrichmentProcessor legalEntityChildEnrichmentProcessor(MappingDAO mappingDAO) {
+        return new LegalEntityChildEnrichmentProcessor(mappingDAO,taskletCofaceChildDomainWrapper,errorLogDAO);
+    }
+
+    @Bean
+    public Step legalEntityChildEnrichStep(JobRepository jobRepository,
+                                           PlatformTransactionManager transactionManager,
+                                           FlatFileItemReader<LegalEntityChildDomain> legalEntityChildReader,
+                                           LegalEntityChildEnrichmentProcessor legalEntityChildEnrichmentProcessor,
+                                           JdbcBatchItemWriter<LegalEntityChildDomain> legalEntityChildWriter) {
+
+        return new StepBuilder("legalEntityChildEnrichStep", jobRepository)
+                .<LegalEntityChildDomain, LegalEntityChildDomain>chunk(100, transactionManager)
+                .reader(legalEntityChildReader())
+                .processor(legalEntityChildEnrichmentProcessor)
+                .writer(legalEntityChildWriter)
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(100)
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
+    }
+
+
+    @Bean
+    public LEParentEnrichmentProcessor leParentEnrichmentProcessor() {
+        return new LEParentEnrichmentProcessor(mappingDAO, taskletCofaceParentDomainWrapper);
+    }
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<LegalEntityParentDomain> legalEntityParentReader() {
+        String fileId = StepSynchronizationManager.getContext().getStepExecution()
+                .getJobParameters().getString("leParentFileId");
+        return new FlatFileItemReaderBuilder<LegalEntityParentDomain>()
+                .name(COFACE_LE_BATCH_PARENT_FILE_READER_NAME)
+                .resource(getFileForLocalRun(readFileFrom, cofaceLEParentFileName,fileId))
+                .delimited()
+                .names(LegalEntityParent.LE_EXTERNAL_IDENTIFIER, ORG_STATUS, ORG_NAME, ORG_OTHER_NAME,
+                        ORG_OTHER_NAME_TYPE, ADR_UNSTRUCTURED_ADDRESS, LE_POSTAL_ADDRESS_STREET_NAME,
+                        LE_POSTAL_ADDRESS_HOUSE_NUM, LE_POSTAL_ADDRESS_HOUSE_NUM_ADD,
+                        LE_POSTAL_ADDRESS_POSTAL_CODE, LE_POSTAL_ADDRESS_CITY_NAME,
+                        LE_POSTAL_ADDRESS_CNTRY_CD, ORG_LEGAL_FORM, ORG_BUSINESS_CLOSEDOWN_DATE,
+                        LE_LEGAL_STATUS, ASMT_ID_VERIFY_APPROVAL_DATE, LE_PREFERRED_LANGUAGE,
+                        LE_DIGITAL_ADDR_FULL_TEL, NSSO_EXTERNAL_IDENTIFIER, ASMT_VAT_STATUS,
+                        NSSO_EXTERNAL_IDENTIFIER_STATUS)
+                .fieldSetMapper(new LegalEntityParentFieldSetMapper())
+                .linesToSkip(1)
+                .build();
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityParentDomain> legalEntityParentWriter(DataSource dataSource) {
+
+        return new JdbcBatchItemWriterBuilder<LegalEntityParentDomain>()
+                .sql(LEGAL_ENTITY_PARENT_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<LegalEntityChildDomain> legalEntityChildReader() {
+        String fileId = StepSynchronizationManager.getContext().getStepExecution()
+                .getJobParameters().getString("leChildFileId");
+        return new FlatFileItemReaderBuilder<LegalEntityChildDomain>()
+                .name(COFACE_LE_BATCH_CHILD_FILE_READER_NAME)
+                .resource(getFileForLocalRun(readFileFrom, cofaceLEChildFileName,fileId))
+                .delimited()
+                .names(LegalEntityParent.LE_EXTERNAL_IDENTIFIER, INDUSTRY_CLASS_CODE, INDUSTRY_CLASS_RANK,
+                        INDUSTRY_CLASS_EFF_DATE, INDUSTRY_CLASS_END_DATE)
+                .fieldSetMapper(new LegalEntityChildFieldSetMapper())
+                .linesToSkip(1)
+                .build();
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityChildDomain> legalEntityChildWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<LegalEntityChildDomain>()
+                .sql(LEGAL_ENTITY_CHILD_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean(name = "LegalEntityEnrichmentJob")
+    public Job lEEnrichmentJob(JobRepository jobRepository, Step legalEntityParentEnrichStep, Step legalEntityChildEnrichStep, Step organisationSearchApiTaskletStep) {
+
+        return new JobBuilder(COFACE_LE_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(legalEntityParentEnrichStep)
+                .next(legalEntityChildEnrichStep)
+                .next(organisationSearchApiTaskletStep)
+                .build();
+    }
+    // Legal Entity batch config End ----------------------------------------------------------------------------------------
+
+
+    @Bean
+    @StepScope
+    public FlatFileItemReader<IncapableRelationship> incapablesReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution()
+                .getJobParameters()
+                .getString("incapablesFileId");
+
+        return new FlatFileItemReaderBuilder<IncapableRelationship>()
+                .name(INCAPABLES_BATCH_FILE_READER_NAME)
+                .resource(getFileForLocalRun(readFileFrom, cofaceIncapablesFileName, fileId))
+                .delimited()
+                .names(INCP_GENDER, INCP_LASTNAME, INCP_FIRSTNAME, INCP_STREETNAME,
+                        INCP_HOUSENUMBER, INCP_HOUSENUMBERADDITION, INCP_POSTALCODE,
+                        INCP_CITYNAME, INCP_COUNTRYOFRESIDENCE, INCP_DATEOFBIRTH,
+                        INCP_DATEOFDEATH, INCP_CITYOFBIRTH, INCP_COUNTRYOFBIRTH,
+                        OBJECT_CODE, INAB_ENDDATE, INAB_EFFECTIVEDATE,
+                        ADM_OCCUPATIONCODE, ADM_LASTNAME, ADM_FIRSTNAME,
+                        ADM_STREETNAME, ADM_HOUSENUMBER, ADM_HOUSENUMBERADDITION,
+                        ADM_POSTALCODE, ADM_CITYNAME, ADM_COUNTRYOFRESIDENCE,
+                        ADM_RESPONSIBILITY_ENDDATE)
+                .fieldSetMapper(new IncapablesFieldSetMapper())
+                .linesToSkip(1)
+                .build();
+    }
+
+    @Bean
+    public IncapablesEnrichmentProcessor incapablesProcessor() {
+        return new IncapablesEnrichmentProcessor(mappingDAO);
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<IncapableRelationship> incapablesWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<IncapableRelationship>()
+                .sql(IncapablesQueries.INCAPABLES_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean
+    public Step incapablesEnrichmentStep(JobRepository jobRepository,
+                                         PlatformTransactionManager transactionManager,
+                                         FlatFileItemReader<IncapableRelationship> incapablesReader,
+                                         IncapablesEnrichmentProcessor incapablesProcessor,
+                                         JdbcBatchItemWriter<IncapableRelationship> incapablesWriter) {
+        return new StepBuilder(INCAPABLES_BATCH_STEP_NAME, jobRepository)
+                .<IncapableRelationship, IncapableRelationship>chunk(100, transactionManager)
+                .reader(incapablesReader)
+                .processor(incapablesProcessor)
+                .writer(incapablesWriter)
+                .listener(incapablesProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        incapablesProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .retryLimit(3)
+                .retry(Exception.class)
+                .build();
+    }
+
+    @Bean(name = "IncapablesEnrichmentJob")
+    public Job incapablesEnrichmentJob(JobRepository jobRepository, Step incapablesEnrichmentStep) {
+        log.info("IncapablesEnrichmentJob job started");
+        return new JobBuilder(INCAPABLES_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(incapablesEnrichmentStep)
+                .build();
+    }
+
+    // Legal Entity Deletion batch config start ----------------------------------------------------------------------------------------
+
+    @Bean
+    @StepScope
+    public FlatFileItemReader<LegalEntityDeletionDomain> legalEntityDeletionReader() {
+        String fileId = StepSynchronizationManager.getContext().getStepExecution()
+                .getJobParameters().getString("leDeletionFileId");
+        return new FlatFileItemReaderBuilder<LegalEntityDeletionDomain>()
+                .name(COFACE_LE_DELETION_BATCH_FILE_READER_NAME)
+                .resource(getFileForLocalRun(readFileFrom, cofaceLEDeleteFileName, fileId))
+                .delimited()
+                .names(LegalEntityDeletionFieldSetMapper.LE_EXTERNAL_IDENTIFIER,
+                       LegalEntityDeletionFieldSetMapper.LE_DELETION_FLAG)
+                .fieldSetMapper(new LegalEntityDeletionFieldSetMapper())
+                .linesToSkip(1)
+                .build();
+    }
+
+    @Bean
+    public LEDeletionEnrichmentProcessor leDeletionEnrichmentProcessor() {
+        return new LEDeletionEnrichmentProcessor(mappingDAO, legalEntityDeletionDAO, taskletLeDeletionDomainWrapper, errorLogDAO);
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityDeletionDomain> legalEntityDeletionWriter(DataSource dataSource) {
+        String sql = "INSERT INTO DD_LEGALENTITY_DELETE_TBL (LE_DELETION_FLAG, DD_UUID, FILE_ID, CREATED_BY, CREATED_TS) " +
+                     "VALUES (:leDeletionFlag, :ddUuid, :fileId, 'DD_USER', SYSTIMESTAMP)";
+        return new JdbcBatchItemWriterBuilder<LegalEntityDeletionDomain>()
+                .sql(sql)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean
+    public Step legalEntityDeletionEnrichStep(JobRepository jobRepository,
+                                               PlatformTransactionManager transactionManager,
+                                               FlatFileItemReader<LegalEntityDeletionDomain> legalEntityDeletionReader,
+                                               LEDeletionEnrichmentProcessor leDeletionEnrichmentProcessor,
+                                               JdbcBatchItemWriter<LegalEntityDeletionDomain> legalEntityDeletionWriter) {
+        return new StepBuilder(COFACE_LE_DELETION_BATCH_STEP_NAME, jobRepository)
+                .<LegalEntityDeletionDomain, LegalEntityDeletionDomain>chunk(100, transactionManager)
+                .reader(legalEntityDeletionReader())
+                .processor(leDeletionEnrichmentProcessor)
+                .writer(legalEntityDeletionWriter)
+                .listener((StepExecutionListener) leDeletionEnrichmentProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        leDeletionEnrichmentProcessor.flushRecords();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(100)
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
+    }
+
+    @Bean
+    public Step leDeletionApiTaskletStep(JobRepository jobRepository,
+                                          PlatformTransactionManager transactionManager,
+                                          LEDeletionApiTasklet leDeletionApiTasklet) {
+        return new StepBuilder(LE_DELETION_API_TASKLET_STEP, jobRepository)
+                .tasklet(leDeletionApiTasklet, transactionManager)
+                .build();
+    }
+
+    @Bean(name = "LegalEntityDeletionJob")
+    public Job legalEntityDeletionJob(JobRepository jobRepository,
+                                       Step legalEntityDeletionEnrichStep,
+                                       Step leDeletionApiTaskletStep) {
+        log.info("LegalEntityDeletionJob job started");
+        return new JobBuilder(COFACE_LE_DELETION_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(legalEntityDeletionEnrichStep)
+                .next(leDeletionApiTaskletStep)
+                .build();
+    }
+    // Legal Entity Deletion batch config End ----------------------------------------------------------------------------------------
+
+
+    // Read File from ECS/Local-folder --------------------------------------------------------------------------------------
+    private Resource getFileForLocalRun(String fileFrom, String fileName, String fileId) {
+        Resource resource = null;
+        log.info("DD_Data_Distributor Read File from {}, filename:{}", fileFrom, fileName);
+        if (fileFrom.equalsIgnoreCase("ECS")) {
+            resource = fileProviderService.getFile(bucketName, fileName);
+        } else if (fileName.equalsIgnoreCase(cofaceLEChildFileName)) {
+            resource = resourceLEChildFile;
+        } else if (fileName.equalsIgnoreCase(cofaceLEParentFileName)) {
+            resource = resourceLEParentFile;
+        } else if (fileName.equalsIgnoreCase(cofaceOUFileName)) {
+            resource = resourceOUFile;
+        } else if (fileName.equalsIgnoreCase(cofaceIncapablesFileName)) {
+            resource = resourceIncapablesFile;
+        } else if (fileName.equalsIgnoreCase(cofaceLEDeleteFileName)) {
+            resource = resourceLEDeleteFile;
         } else {
-            // Default to resources
-            return "src/main/resources/" + fileName;
+            log.error("DD_Data_Distributor Unknown File Name {}", fileName);
+            return null;
         }
+        log.info("DD_Data_Distributor File Downloaded Successfully...!");
+        fileIngestionService.updateTotalNumberOfRecords(fileId, resource);
+        return resource;
     }
 
-    @Scheduled(cron = "${spring.batch.schedular.incapablesCron}")
-    public void runIncapables() {
-        log.info("Incapables Batch Schedular started:{}", LocalDateTime.now());
-        JobExecution execution = null;
-        String fileId = null;
-        String fileName = null;
-
-        if (!incapablesBatchRunning.compareAndSet(false, true)) {
-            log.info("Incapables Batch still running, skipping this run :{}", LocalDateTime.now());
-            return;
-        }
-
-        if (runFlagIncapables) {
-            try {
-                log.info("Incapables Batch Schedular cron:{} started:{}", incapablesCron, LocalDateTime.now());
-
-                fileName = cofaceIncapablesFileName;
-                String filePath = buildFilePath(fileName);
-
-                Long incapablesTotalRecords = CsvTotalRecordsParser.getTotalRecordsFromCsv(filePath);
-                Long incapablesFileSize = CsvTotalRecordsParser.getFileSizeInBytes(filePath);
-
-                log.info("Incapables File: {} - Total records from file: {}, File size: {}",
-                        fileName, incapablesTotalRecords, incapablesFileSize);
-                fileId = fileIngestionService.registerFileIngestion(
-                        fileName,
-                        "COFACE_INCAPABLES",
-                        "INCAPABLES",
-                        "COFACE_SYSTEM",
-                        "DAILY",
-                        incapablesTotalRecords
-                );
-
-                JobParameters jobParameters = new JobParametersBuilder(jobExplorer)
-                        .addLong("run.id", System.currentTimeMillis())
-                        .addString("incapablesFileId", fileId)
-                        .addString("fileName", fileName)
-                        .toJobParameters();
-
-                fileIngestionService.markFileProcessingStart(fileId, String.valueOf(System.currentTimeMillis()));
-
-                execution = jobLauncher.run(incapablesJob, jobParameters);
-
-
-                String fileChecksum = FileUtility.calculateMD5Checksum(filePath);
-                String formattedSize = FileUtility.formatFileSize(incapablesFileSize);
-
-                if (execution.getStatus().isUnsuccessful()) {
-                    String errorMsg = "Batch execution failed with status: " + execution.getStatus();
-                    log.error("Incapables Batch failed: {}", errorMsg);
-                    fileIngestionService.markFileProcessingFailed(fileId, errorMsg);
-                } else {
-
-                    // *** NEW: read counters from execution context ***
-                    Long totalRecords = getTotalRecordsFromExecution(execution);
-                    Long processedRecords = getProcessedRecordsFromExecution(execution);
-                    Long failedRecords = getFailedRecordsFromExecution(execution);
-
-                    // fallback if job context did not set total
-                    if (totalRecords == 0L && incapablesTotalRecords > 0L) {
-                        totalRecords = incapablesTotalRecords;
-                    }
-
-                    if (processedRecords == 0L && totalRecords > 0L) {
-                        processedRecords = totalRecords;
-                    }
-
-                    if (failedRecords == null) {
-                        failedRecords = 0L;
-                    }
-
-                    log.info("Incapables Batch completed - fileSize: {}, checksum: {}, totalRecords: {}, processedRecords: {}, failedRecords: {}",
-                            formattedSize, fileChecksum, totalRecords, processedRecords, failedRecords);
-
-                    fileIngestionService.updateFileProcessingEnd(
-                            fileId,
-                            incapablesFileSize,
-                            fileChecksum,
-                            totalRecords,
-                            processedRecords,
-                            failedRecords
-                    );
-                }
-
-            } catch (Exception e) {
-                log.error("Exception in Incapables Batch Schedular", e);
-                if (fileId != null) {
-                    fileIngestionService.markFileProcessingFailed(fileId, "Exception in batch scheduler: " + e.getMessage());
-                }
-            } finally {
-                log.info("Incapables Batch Schedular finished name:{} status:{}",
-                        incapablesJob.getName(),
-                        execution != null ? execution.getStatus() : "FAILED");
-
-                incapablesBatchRunning.set(false);
-            }
-
-        } else {
-            log.info("Incapables Batch Schedular flag stopped");
-        }
-
-        runFlagIncapables = false;
-    }
-    @Scheduled(cron = "${spring.batch.schedular.leDeletionCron:0 */5 * * * *}")
-    public void runLEDeletion() {
-        log.info("LegalEntity Deletion Batch Schedular started:{}", LocalDateTime.now());
-        JobExecution execution = null;
-        String fileId = null;
-        String fileName = null;
-
-        if (!leDeletionBatchRunning.compareAndSet(false, true)) {
-            log.info("LegalEntity Deletion Batch still running, skipping this run :{}", LocalDateTime.now());
-            return;
-        }
-        if (runFlagLEDeletion) {
-            try {
-                log.info("LegalEntity Deletion Batch Schedular cron:{} started:{}", leDeletionCron, LocalDateTime.now());
-
-                // Fetch file name from configuration
-                fileName = cofaceLEDeleteFileName;
-                String filePath = buildFilePath(fileName);
-
-
-                Long totalRecords = CsvTotalRecordsParser.getTotalRecordsFromCsv(filePath);
-                Long fileSize = CsvTotalRecordsParser.getFileSizeInBytes(filePath);
-
-                fileId = fileIngestionService.registerFileIngestion(
-                        fileName,
-                        "COFACE_LE_DELETION",
-                        "LE",
-                        "COFACE_SYSTEM",
-                        "DAILY",
-                        totalRecords
-                );
-
-                JobParameters jobParameters = new JobParametersBuilder(jobExplorer)
-                        .addLong("run.id", System.currentTimeMillis())
-                        .addString("leDeletionFileId", fileId)
-                        .addString("fileName", fileName)
-                        .toJobParameters();
-
-                // Mark file processing start
-                fileIngestionService.markFileProcessingStart(fileId, String.valueOf(System.currentTimeMillis()));
-
-                execution = jobLauncher.run(leDeletionJob, jobParameters);
-
-                // Update file processing completion based on execution status
-                if (execution.getStatus().toString().equals("COMPLETED")) {
-                    log.info("LegalEntity Deletion Batch completed - fileId: {}", fileId);
-                } else {
-                    String errorMsg = "Batch execution failed with status: " + execution.getStatus();
-                    log.error("LegalEntity Deletion Batch failed: {}", errorMsg);
-                    fileIngestionService.markFileProcessingFailed(fileId, errorMsg);
-                }
-            } catch (Exception e) {
-                log.error("Exception in LegalEntity Deletion Batch Schedular", e);
-
-                // Log to DD_ERROR_LOG table
-                try {
-                    StringWriter sw = new StringWriter();
-                    e.printStackTrace(new PrintWriter(sw));
-
-                    errorLogDAO.logError(
-                            RecordType.LEGAL_ENTITY_DELETION,
-                            "BATCH_JOB",
-                            null,
-                            ErrorType.DATABASE_ERROR,
-                            "Batch Scheduler Exception: " + e.getMessage(),
-                            null,
-                            fileName,
-                            sw.toString(),
-                            fileId
-                    );
-                } catch (Exception logEx) {
-                    log.error("Failed to log batch scheduler error", logEx);
-                }
-
-                // Mark file as failed
-                if (fileId != null) {
-                    try {
-                        fileIngestionService.markFileProcessingFailed(fileId, "Exception in batch scheduler: " + e.getMessage());
-                    } catch (Exception fileEx) {
-                        log.error("Failed to mark file as failed", fileEx);
-                    }
-                }
-            } finally {
-                if (execution != null) {
-                    log.info("LegalEntity Deletion Batch Schedular finished name:{} status:{}", leDeletionJob.getName(), execution.getStatus());
-                } else {
-                    log.info("LegalEntity Deletion Batch Schedular failed name:{}", leDeletionJob.getName());
-                }
-                leDeletionBatchRunning.set(false);
-            }
-        } else {
-            log.info("LegalEntity Deletion Batch Schedular flag stopped");
-        }
-        runFlagLEDeletion = false;
+    public void logDataRetentionSchedulerStatus(DataRetentionConfig dataRetentionConfig) {
+        boolean isRetentionJobEnabled = dataRetentionConfig.isEnabled();
+        dataRetentionConfig.logRetentionJobStatus(isRetentionJobEnabled);
     }
 }
-package com.ing.datadist.util;
+new::
+ package com.ing.datadist.batch.config;
 
+import com.ing.datadist.batch.processor.*;
+import com.ing.datadist.batch.processor.OrganisationUnitEnrichmentProcessor;
+import com.ing.datadist.batch.tasklet.LEDeletionApiTasklet;
+import com.ing.datadist.batch.tasklet.OrganisationSearchApiTasklet;
+import com.ing.datadist.batch.tasklet.OrganisationUnitSearchApiTasklet;
+import com.ing.datadist.dao.LegalEntityDeletionDAO;
+import com.ing.datadist.dao.MappingDAO;
+import com.ing.datadist.dao.queries.IncapablesQueries;
+import com.ing.datadist.dao.ErrorLogDAO;
+import com.ing.datadist.domain.*;
+import com.ing.datadist.domain.fileinput.LegalEntityParent;
+import com.ing.datadist.domain.fileinput.OrganisationUnit;
+import com.ing.datadist.domain.incapables.IncapableRelationship;
+import com.ing.datadist.ecs.services.FileProviderService;
+import com.ing.datadist.retention.config.DataRetentionConfig;
 import lombok.extern.slf4j.Slf4j;
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.listener.SkipListenerSupport;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.database.JdbcBatchItemWriter;
+import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.item.file.separator.DefaultRecordSeparatorPolicy;
+import org.springframework.batch.item.file.transform.IncorrectTokenCountException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
+import org.springframework.transaction.PlatformTransactionManager;
+import com.ing.datadist.enums.ErrorType;
+import com.ing.datadist.enums.RecordType;
+import com.ing.datadist.service.FileIngestionService;
 
-/**
- * Utility class to parse total records count from CSV files
- * The total records count is expected to be in the last line of the file
- */
+import javax.sql.DataSource;
+
+import static com.ing.datadist.batch.config.BatchConstants.*;
+import static com.ing.datadist.domain.fileinput.Incapables.*;
+import static com.ing.datadist.domain.fileinput.LegalEntityChild.*;
+import static com.ing.datadist.domain.fileinput.LegalEntityParent.*;
+import static com.ing.datadist.domain.fileinput.OrganisationUnit.*;
+
 @Slf4j
-public class CsvTotalRecordsParser {
+@Configuration
+public class BatchJobConfig {
 
-    /**
-     * Read total records count from CSV file (last line)
-     * @param filePath Path to the CSV file
-     * @return Total records count, or 0 if not found
-     */
-    public static Long getTotalRecordsFromCsv(String filePath) {
-        try {
-            String lastLine = getLastLineFromFile(filePath);
-            if (lastLine != null && !lastLine.trim().isEmpty()) {
-                try {
-                    Long totalRecords = Long.parseLong(lastLine.trim());
-                    log.info("CsvTotalRecordsParser: Found total records {} from file {}", totalRecords, filePath);
-                    return totalRecords;
-                } catch (NumberFormatException e) {
-                    log.warn("CsvTotalRecordsParser: Last line is not a number: {}", lastLine);
-                    return 0L;
-                }
+    private static final String COFACE_OPS_TABLE_INSERT_SQL =
+            "INSERT INTO DD_COFACEOPS_TBL (OPS_UUID, OPS_NUMBER, ORG_UUID, ORG_NUMBER, OPS_ORGANISATIONUNITNAME, " +
+                    "ADDRESS, ADR_POSTALADDRESS_STREETNM, ADR_POSTALADDRESS_HOUSENUM, ADR_POSTALADDRESS_HOUSEADD, " +
+                    "ADR_POSTALADDRESS_POSTALCD, ADR_POSTALADDRESS_CITYNAME, ADR_POSTALADDRESS_CNTRYCD, " +
+                    "OPS_EXTID_DATEOFISSUE, OPS_EXTID_EXPIRYDATE, " +
+                    "ADR_DIGITALADDR_FULLTEL, ADR_DIGITALADDR_FULLTELFGN, ADR_DIGITALADDR_EMAIL, " +
+                    "FILE_ID) " +
+                    "VALUES (:opsUUID, :opsExternalIdentifierVal, :orgUUID, :orgExternalIdentifierVal, :organisationUnitName, " +
+                    ":address, :postalAddressStreetNm, :postalAddressHouseNum, :postalAddressHouseAdd, " +
+                    ":postalAddressPostalCd, :postalAddressCityName, :postalAddressCntryCd, " +
+                    ":opsExtIdDateOfIssue, :opsExtIdExpiryDate, " +
+                    ":digitalAddrFullTel, :digitalAddrFullTefgn, :digitalAddrEmail, " +
+                    ":fileId)";
+    private final static String IP_EXTERNAL_VAL = "OPS_ExternalIdentifier_Val";
+    private final static String LE_EXTERNAL_VAL = "LE_ExternalIdentifier_Val";
+    private final static String OU_ORGANISATIOIN_UNITNAME = "OPS_OrganisationUnitName";
+    private final static String ADDRESS = "ADDRESS";
+    private final static String ADR_POSTALADDRESS_STREETNM = "Adr_PostalAddress_StreetNm";
+    private final static String ADR_POSTALADDRESS_HOUSENUM = "Adr_PostalAddress_HouseNum";
+    private final static String ADR_POSTALADDRESS_HOUSEDD = "Adr_PostalAddress_HouseAdd";
+    private final static String ADR_POSTALADDRESS_POSTALCD = "Adr_PostalAddress_PostalCd";
+    private final static String ADR_POSTALADDRESS_CITYNAME = "Adr_PostalAddress_CityName";
+    private final static String ADR_POSTALADDRESS_CNTRYCD = "Adr_PostalAddress_CntryCd";
+    private final static String IP_EXTID_DATEOFISSUE = "IP_ExtId_DateOfIssue";
+    private final static String IP_EXTId_EXPIRYDATE = "IP_ExtId_ExpiryDate";
+    private final static String ADR_DIGITALADDR_FULLTEL = "ADR_Digitaladdr_Fulltel";
+    private final static String ADR_DIGITALADDR_FULLTELFGN = "Adr_Digitaladdr_Fulltelgn";
+    private final static String ADR_DIGITALADDR_EMAIL = "Adr_DigitalAddr_Email";
+    private final static String COFACE_OPS_BATCH_FILE_READER_NAME = "organisationUnitReader";
+    private final static String COFACE_OPS_BATCH_STEP_NAME = "organisationUnitEnrichmentStep";
+    private final static String COFACE_OPS_BATCH_JOB_NAME = "organisationUnitEnrichmentJob";
+    private final static String COFACE_LE_BATCH_JOB_NAME = "LegalEntityEnrichmentJob";
+    private final static String COFACE_LE_BATCH_FILE_READER_NAME = "organisationReader";
+    private final static String COFACE_LE_BATCH_PARENT_FILE_READER_NAME = "legalEntityParentReader";
+    private final static String COFACE_LE_BATCH_CHILD_FILE_READER_NAME = "legalEntityChildReader";
+    String LEGAL_ENTITY_PARENT_TABLE_INSERT_SQL =
+            "INSERT INTO DD_LEGAL_ENTITY_PARENT_TBL (" +
+                    "DD_UUID, ORG_STATUS, ORG_NAME, ORG_OTHER_NAME, ORG_OTHER_NAME_TYPE, " +
+                    "ADR_UNSTRUCTURED_ADDRESS, ADR_POSTALADDRESS_STREETNM, ADR_POSTALADDRESS_HOUSENUM, " +
+                    "ADR_POSTALADDRESS_HOUSEADD, ADR_POSTALADDRESS_POSTALCD, ADR_POSTALADDRESS_CITYNAME, " +
+                    "ADR_POSTALADDRESS_CNTRYCD, ORG_LEGAL_FORM, ORG_BUSINESS_CLOSE_DOWN_DATE, " +
+                    "LE_LEGAL_STATUS, ORG_DATE_OF_FOUNDATION, LE_PREFERRED_LANGUAGE, " +
+                    "ADR_DIGITALADDR_FULLTEL, NSSO_EXTL_IDENTIFIER, " +
+                    "ASMT_VAT_STATUS, NSSO_EXTL_IDENTIFIER_STATUS, " +
+                    "FILE_ID) " +
+                    "VALUES (" +
+                    ":orgUUID, :orgStatus, :orgName, :orgOtherName, :orgOtherNameType, " +
+                    ":adrUnstructuredAddress, :adrPostalAddressStreetName, :adrPostalAddressHouseNum, " +
+                    ":adrPostalAddressHouseNumAdd, :adrPostalAddressPostalCode, :adrPostalAddressCityName, " +
+                    ":adrPostalAddressCountryCode, :orgLegalForm, :orgBusinessClosedownDate, " +
+                    ":lELegalStatus, :asmtIdVerifyApprovalDate, :lEPreferredLanguage, " +
+                    ":adrDigitalAddrFullTel, :nssoExternalIdentifier, " +
+                    ":asmtVatStatus, :nssoExternalIdentifierStatus, " +
+                    ":fileId)";
+    String LEGAL_ENTITY_CHILD_TABLE_INSERT_SQL =
+            "INSERT INTO DD_LEGAL_ENTITY_CHILD_TBL (" +
+                    "DD_UUID, INDUSTRY_CLASS_CODE, INDUSTRY_CLASS_CODE_RANK, INDUSTRY_CLASS_EFF_DATE, INDUSTRY_CLASS_END_DATE, " +
+                    "FILE_ID) " +
+                    "VALUES (" +
+                    ":orgUUID, :industryClassCode, :industryClassRank, :industryClassEffDate, :industryClassEndDate, :fileId)";
+
+    @Autowired
+    FileProviderService fileProviderService;
+    @Autowired
+    private MappingDAO mappingDAO;
+    @Autowired
+    private ErrorLogDAO errorLogDAO;
+    @Autowired
+    private TaskletCofaceOpsDomainWrapper taskletCofaceOpsDomainWrapper;
+    @Autowired
+    private TaskletCofaceParentDomainWrapper taskletCofaceParentDomainWrapper;
+    @Autowired
+    private TaskletCofaceChildDomainWrapper taskletCofaceChildDomainWrapper;
+    @Autowired
+    private TaskletLeDeletionDomainWrapper taskletLeDeletionDomainWrapper;
+    @Autowired
+    private LegalEntityDeletionDAO legalEntityDeletionDAO;
+    @Autowired
+    private FileIngestionService fileIngestionService;
+    @Value("${ecs.bucketName}")
+    private String bucketName;
+    @Value("${ecs.cofaceOUFileName}")
+    private String cofaceOUFileName;
+    @Value("${ecs.cofaceLEParentFileName}")
+    private String cofaceLEParentFileName;
+    @Value("${ecs.cofaceLEChildFileName}")
+    private String cofaceLEChildFileName;
+    @Value("${ecs.cofaceIncapablesFileName}")
+    private String cofaceIncapablesFileName;
+    @Value("${ecs.cofaceLEDeleteFileName:COFACE_LE_DEL.csv}")
+    private String cofaceLEDeleteFileName;
+    @Value("${ecs.readFileFrom}")
+    private String readFileFrom;
+    @Value("${app.input-file}")
+    private Resource resourceOUFile;
+    @Value("${app.le-parent-file}")
+    private Resource resourceLEParentFile;
+    @Value("${app.le-child-file}")
+    private Resource resourceLEChildFile;
+    @Value("${app.incapables-file}")
+    private Resource resourceIncapablesFile;
+    @Value("${app.le-delete-file:classpath:COFACE_LE_DEL.csv}")
+    private Resource resourceLEDeleteFile;
+
+
+
+    @Bean
+    @StepScope
+    public FlatFileItemReader<OrganisationUnitDomain> organisationUnitReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution().getJobParameters().getString("opsFileId");
+
+        FlatFileItemReader<OrganisationUnitDomain> reader =
+                new FlatFileItemReaderBuilder<OrganisationUnitDomain>()
+                        .name("organisationUnitReader")
+                        .resource(getFileForLocalRun(readFileFrom, cofaceOUFileName, fileId))
+                        .delimited()
+                        .names(
+                                OrganisationUnit.LE_EXTERNAL_IDENTIFIER,
+                                OPS_EXTERNAL_IDENTIFIER_VAL,
+                                ORGANISATION_UNIT_NAME,
+                                ADDRESS,
+                                UNIT_POSTAL_ADDRESS_STREET_NM,
+                                UNIT_POSTAL_ADDRESS_HOUSE_NUM,
+                                UNIT_POSTAL_ADDRESS_HOUSE_ADD,
+                                UNIT_POSTAL_ADDRESS_POSTAL_CD,
+                                UNIT_POSTAL_ADDRESS_CITY_NAME,
+                                UNIT_POSTAL_ADDRESS_CNTRY_CD,
+                                OPS_EXT_ID_DATE_OF_ISSUE,
+                                OPS_EXT_ID_EXPIRY_DATE,
+                                UNIT_DIGITAL_ADDR_FULL_TEL,
+                                UNIT_DIGITAL_ADDR_EMAIL
+                        )
+                        .fieldSetMapper(new OrganisationUnitFieldSetMapper())
+                        .linesToSkip(1)
+                        .build();
+
+        reader.setRecordSeparatorPolicy(new SkipCounterLinePolicy());
+        return reader;
+    }
+    @Bean
+    public OrganisationUnitEnrichmentProcessor organisationUnitProcessor() {
+        return new OrganisationUnitEnrichmentProcessor(mappingDAO, taskletCofaceOpsDomainWrapper);
+    }
+
+
+    @Bean
+    public JdbcBatchItemWriter<OrganisationUnitDomainWrapper> organisationUnitWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<OrganisationUnitDomainWrapper>()
+                .sql(COFACE_OPS_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+
+    @Bean
+    public Step organisationUnitEnrichmentStep(JobRepository jobRepository,
+                                               PlatformTransactionManager transactionManager,
+                                               FlatFileItemReader<OrganisationUnitDomain> organisationUnitReader,
+                                               OrganisationUnitEnrichmentProcessor organisationUnitProcessor,
+                                               JdbcBatchItemWriter<OrganisationUnitDomainWrapper> organisationUnitWriter) {
+        return new StepBuilder(COFACE_OPS_BATCH_STEP_NAME, jobRepository)
+                .<OrganisationUnitDomain, OrganisationUnitDomainWrapper>chunk(100, transactionManager)
+                .reader(organisationUnitReader())
+                .processor(organisationUnitProcessor)
+                .writer(organisationUnitWriter)
+                .listener((StepExecutionListener) organisationUnitProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        organisationUnitProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(Integer.MAX_VALUE)
+                .listener(new org.springframework.batch.core.listener.SkipListenerSupport<OrganisationUnitDomain, OrganisationUnitDomainWrapper>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        if (t instanceof FlatFileParseException) {
+                            FlatFileParseException ex = (FlatFileParseException) t;
+                            log.error("CSV Parsing error at line: {}, input: {}", ex.getLineNumber(), ex.getInput());
+
+                            try {
+                                errorLogDAO.logParsingError(
+                                        RecordType.ORGANISATION_UNIT,
+                                        "cofaceOpsData.csv",
+                                        "Parsing error at line: " + ex.getLineNumber() + ", input: " + ex.getInput(),
+                                        null,  // batchId
+                                        ex.toString(),  // stackTrace
+                                        null  // fileId
+                                );
+                            } catch (Exception logEx) {
+                                log.error("Failed to log parsing error", logEx);
+                            }
+                        }
+                    }
+                })
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
+    }
+
+    @Bean
+    public Step organisationUnitSearchApiTaskletStep(JobRepository jobRepository,
+                                                     PlatformTransactionManager transactionManager,
+                                                     OrganisationUnitSearchApiTasklet organisationUnitSearchApiTasklet) {
+        return new StepBuilder("organisationUnitSearchApiTaskletStep", jobRepository)
+                .tasklet(organisationUnitSearchApiTasklet, transactionManager)
+                .build();
+    }
+
+    @Bean(name = "organisationUnitEnrichmentJob")
+
+    public Job enrichmentJob(JobRepository jobRepository, Step organisationUnitEnrichmentStep, Step organisationUnitSearchApiTaskletStep) {
+        return new JobBuilder(COFACE_OPS_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+
+
+                .start(organisationUnitEnrichmentStep)
+                .next(organisationUnitSearchApiTaskletStep)
+                .build();
+    }
+
+    // Legal Entity batch config start ----------------------------------------------------------------------------------------
+    @Bean
+    public Step organisationSearchApiTaskletStep(JobRepository jobRepository,
+                                                 PlatformTransactionManager transactionManager,
+                                                 OrganisationSearchApiTasklet organisationSearchApiTasklet) {
+        return new StepBuilder("organisationSearchApiTaskletStep", jobRepository)
+                .tasklet(organisationSearchApiTasklet, transactionManager)
+                .build();
+    }
+
+    @Bean
+    public Step legalEntityParentEnrichStep(
+            JobRepository jobRepository,
+            PlatformTransactionManager transactionManager,
+            FlatFileItemReader<LegalEntityParentDomain> legalEntityParentReader,
+            LEParentEnrichmentProcessor leParentEnrichmentProcessor,
+            JdbcBatchItemWriter<LegalEntityParentDomain> legalEntityParentWriter) {
+
+        return new StepBuilder(COFACE_LE_BATCH_PARENT_STEP_NAME, jobRepository)
+                .<LegalEntityParentDomain, LegalEntityParentDomain>chunk(100, transactionManager)
+                .reader(legalEntityParentReader())
+                .processor(leParentEnrichmentProcessor)
+                .writer(legalEntityParentWriter)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        leParentEnrichmentProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(Integer.MAX_VALUE)
+                .listener(new SkipListenerSupport<LegalEntityParentDomain, LegalEntityParentDomain>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        if (t instanceof FlatFileParseException ex) {
+                            log.error("LE Parent CSV parsing error at line: {}, input: {}", ex.getLineNumber(), ex.getInput());
+                            try {
+                                errorLogDAO.logParsingError(
+                                        RecordType.ORGANISATION_PARENT,
+                                        "cofaceLEParent.csv",
+                                        "Parsing error at line: " + ex.getLineNumber() + ", input: " + ex.getInput(),
+                                        null,
+                                        ex.toString(),
+                                        StepSynchronizationManager.getContext() != null
+                                                ? StepSynchronizationManager.getContext().getStepExecution().getJobParameters().getString("leParentFileId")
+                                                : null
+                                );
+                            } catch (Exception logEx) {
+                                log.error("Failed to log LE Parent parsing error", logEx);
+                            }
+                        }
+                    }
+                })
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .noRetry(IncorrectTokenCountException.class)
+                .build();
+    }
+
+    @Bean
+    public LegalEntityChildEnrichmentProcessor legalEntityChildEnrichmentProcessor(MappingDAO mappingDAO) {
+        return new LegalEntityChildEnrichmentProcessor(mappingDAO,taskletCofaceChildDomainWrapper,errorLogDAO);
+    }
+
+    @Bean
+    public Step legalEntityChildEnrichStep(
+            JobRepository jobRepository,
+            PlatformTransactionManager transactionManager,
+            FlatFileItemReader<LegalEntityChildDomain> legalEntityChildReader,
+            LegalEntityChildEnrichmentProcessor legalEntityChildEnrichmentProcessor,
+            JdbcBatchItemWriter<LegalEntityChildDomain> legalEntityChildWriter) {
+
+        return new StepBuilder("legalEntityChildEnrichStep", jobRepository)
+                .<LegalEntityChildDomain, LegalEntityChildDomain>chunk(100, transactionManager)
+                .reader(legalEntityChildReader())
+                .processor(legalEntityChildEnrichmentProcessor)
+                .writer(legalEntityChildWriter)
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skip(IncorrectTokenCountException.class)   // optional but useful
+                .skipLimit(Integer.MAX_VALUE)
+                .listener(new org.springframework.batch.core.listener.SkipListenerSupport<LegalEntityChildDomain, LegalEntityChildDomain>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        if (t instanceof FlatFileParseException ex) {
+                            log.error("LE Child CSV parsing error at line: {}, input: {}", ex.getLineNumber(), ex.getInput());
+                            try {
+                                errorLogDAO.logParsingError(
+                                        RecordType.ORGANISATION_CHILD,
+                                        "CofaceLEChild.csv",
+                                        "Parsing error at line: " + ex.getLineNumber() + ", input: " + ex.getInput(),
+                                        null,
+                                        ex.toString(),
+                                        StepSynchronizationManager.getContext() != null
+                                                ? StepSynchronizationManager.getContext().getStepExecution().getJobParameters().getString("leChildFileId")
+                                                : null
+                                );
+                            } catch (Exception logEx) {
+                                log.error("Failed to log LE Child parsing error", logEx);
+                            }
+                        }
+                    }
+                })
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .noRetry(IncorrectTokenCountException.class)
+                .build();
+    }
+
+
+    @Bean
+    public LEParentEnrichmentProcessor leParentEnrichmentProcessor() {
+        return new LEParentEnrichmentProcessor(mappingDAO, taskletCofaceParentDomainWrapper);
+    }
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<LegalEntityParentDomain> legalEntityParentReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution().getJobParameters().getString("leParentFileId");
+
+        FlatFileItemReader<LegalEntityParentDomain> reader =
+                new FlatFileItemReaderBuilder<LegalEntityParentDomain>()
+                        .name("legalEntityParentReader")
+                        .resource(getFileForLocalRun(readFileFrom, cofaceLEParentFileName, fileId))
+                        .delimited()
+                        .names(LegalEntityParent.LE_EXTERNAL_IDENTIFIER,
+                                ORG_STATUS,
+                                ORG_NAME,
+                                ORG_OTHER_NAME,
+                                ORG_OTHER_NAME_TYPE,
+                                ADR_UNSTRUCTURED_ADDRESS,
+                                LE_POSTAL_ADDRESS_STREET_NAME,
+                                LE_POSTAL_ADDRESS_HOUSE_NUM,
+                                LE_POSTAL_ADDRESS_HOUSE_NUM_ADD,
+                                LE_POSTAL_ADDRESS_POSTAL_CODE,
+                                LE_POSTAL_ADDRESS_CITY_NAME,
+                                LE_POSTAL_ADDRESS_CNTRY_CD,
+                                ORG_LEGAL_FORM,
+                                ORG_BUSINESS_CLOSEDOWN_DATE,
+                                LE_LEGAL_STATUS,
+                                ASMT_ID_VERIFY_APPROVAL_DATE,
+                                LE_PREFERRED_LANGUAGE,
+                                LE_DIGITAL_ADDR_FULL_TEL,
+                                NSSO_EXTERNAL_IDENTIFIER,
+                                ASMT_VAT_STATUS,
+                                NSSO_EXTERNAL_IDENTIFIER_STATUS
+                        )
+                        .fieldSetMapper(new LegalEntityParentFieldSetMapper())
+                        .linesToSkip(1)
+                        .build();
+
+        reader.setRecordSeparatorPolicy(new SkipCounterLinePolicy());
+        return reader;
+    }
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityParentDomain> legalEntityParentWriter(DataSource dataSource) {
+
+        return new JdbcBatchItemWriterBuilder<LegalEntityParentDomain>()
+                .sql(LEGAL_ENTITY_PARENT_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<LegalEntityChildDomain> legalEntityChildReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution().getJobParameters().getString("leChildFileId");
+
+        FlatFileItemReader<LegalEntityChildDomain> reader =
+                new FlatFileItemReaderBuilder<LegalEntityChildDomain>()
+                        .name("legalEntityChildReader")
+                        .resource(getFileForLocalRun(readFileFrom, cofaceLEChildFileName, fileId))
+                        .delimited()
+                        .names(LegalEntityParent.LE_EXTERNAL_IDENTIFIER,
+                                INDUSTRY_CLASS_CODE,
+                                INDUSTRY_CLASS_RANK,
+                                INDUSTRY_CLASS_EFF_DATE,
+                                INDUSTRY_CLASS_END_DATE
+                        )
+                        .fieldSetMapper(new LegalEntityChildFieldSetMapper())
+                        .linesToSkip(1)
+                        .build();
+
+        reader.setRecordSeparatorPolicy(new SkipCounterLinePolicy());
+        return reader;
+    }
+
+
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityChildDomain> legalEntityChildWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<LegalEntityChildDomain>()
+                .sql(LEGAL_ENTITY_CHILD_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean(name = "LegalEntityEnrichmentJob")
+    public Job lEEnrichmentJob(JobRepository jobRepository, Step legalEntityParentEnrichStep, Step legalEntityChildEnrichStep, Step organisationSearchApiTaskletStep) {
+
+        return new JobBuilder(COFACE_LE_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(legalEntityParentEnrichStep)
+                .next(legalEntityChildEnrichStep)
+                .next(organisationSearchApiTaskletStep)
+                .build();
+    }
+    // Legal Entity batch config End ----------------------------------------------------------------------------------------
+
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<IncapableRelationship> incapablesReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution().getJobParameters().getString("incapablesFileId");
+
+        FlatFileItemReader<IncapableRelationship> reader =
+                new FlatFileItemReaderBuilder<IncapableRelationship>()
+                        .name("incapablesReader")
+                        .resource(getFileForLocalRun(readFileFrom, cofaceIncapablesFileName, fileId))
+                        .delimited()
+                        .names(
+                                INCP_GENDER,
+                                INCP_LASTNAME,
+                                INCP_FIRSTNAME,
+                                INCP_STREETNAME,
+                                INCP_HOUSENUMBER,
+                                INCP_HOUSENUMBERADDITION,
+                                INCP_POSTALCODE,
+                                INCP_CITYNAME,
+                                INCP_COUNTRYOFRESIDENCE,
+                                INCP_DATEOFBIRTH,
+                                INCP_DATEOFDEATH,
+                                INCP_CITYOFBIRTH,
+                                INCP_COUNTRYOFBIRTH,
+                                OBJECT_CODE,
+                                INAB_ENDDATE,
+                                INAB_EFFECTIVEDATE,
+                                ADM_OCCUPATIONCODE,
+                                ADM_LASTNAME,
+                                ADM_FIRSTNAME,
+                                ADM_STREETNAME,
+                                ADM_HOUSENUMBER,
+                                ADM_HOUSENUMBERADDITION,
+                                ADM_POSTALCODE,
+                                ADM_CITYNAME,
+                                ADM_COUNTRYOFRESIDENCE,
+                                ADM_RESPONSIBILITY_ENDDATE
+                        )
+                        .fieldSetMapper(new IncapablesFieldSetMapper())
+                        .linesToSkip(1)
+                        .build();
+
+        reader.setRecordSeparatorPolicy(new SkipCounterLinePolicy());
+        return reader;
+    }
+
+    @Bean
+    public IncapablesEnrichmentProcessor incapablesProcessor() {
+        return new IncapablesEnrichmentProcessor(mappingDAO);
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<IncapableRelationship> incapablesWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<IncapableRelationship>()
+                .sql(IncapablesQueries.INCAPABLES_TABLE_INSERT_SQL)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean
+    public Step incapablesEnrichmentStep(JobRepository jobRepository,
+                                         PlatformTransactionManager transactionManager,
+                                         FlatFileItemReader<IncapableRelationship> incapablesReader,
+                                         IncapablesEnrichmentProcessor incapablesProcessor,
+                                         JdbcBatchItemWriter<IncapableRelationship> incapablesWriter) {
+
+        return new StepBuilder(INCAPABLES_BATCH_STEP_NAME, jobRepository)
+                .<IncapableRelationship, IncapableRelationship>chunk(100, transactionManager)
+                .reader(incapablesReader)
+                .processor(incapablesProcessor)
+                .writer(incapablesWriter)
+                .listener(incapablesProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        incapablesProcessor.flushNewMappings();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skip(IncorrectTokenCountException.class)
+                .skipLimit(Integer.MAX_VALUE)
+                .noRetry(FlatFileParseException.class)
+                .noRetry(IncorrectTokenCountException.class)
+                .retry(Exception.class)
+                .retryLimit(3)
+
+                .listener(new SkipListenerSupport<IncapableRelationship, IncapableRelationship>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        if (t instanceof FlatFileParseException ex) {
+                            log.error("Incapables CSV parsing error at line {}, input={}",
+                                    ex.getLineNumber(), ex.getInput());
+                        }
+                    }
+                })
+                .build();
+    }
+
+    @Bean(name = "IncapablesEnrichmentJob")
+    public Job incapablesEnrichmentJob(JobRepository jobRepository, Step incapablesEnrichmentStep) {
+        log.info("IncapablesEnrichmentJob job started");
+        return new JobBuilder(INCAPABLES_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(incapablesEnrichmentStep)
+                .build();
+    }
+
+    // Legal Entity Deletion batch config start ----------------------------------------------------------------------------------------
+
+    @StepScope
+    @Bean
+    public FlatFileItemReader<LegalEntityDeletionDomain> legalEntityDeletionReader() {
+
+        String fileId = StepSynchronizationManager.getContext()
+                .getStepExecution().getJobParameters().getString("leDeletionFileId");
+
+        FlatFileItemReader<LegalEntityDeletionDomain> reader =
+                new FlatFileItemReaderBuilder<LegalEntityDeletionDomain>()
+                        .name("legalEntityDeletionReader")
+                        .resource(getFileForLocalRun(readFileFrom, cofaceLEDeleteFileName, fileId))
+                        .delimited()
+                        .names(
+                                LegalEntityDeletionFieldSetMapper.LE_EXTERNAL_IDENTIFIER,
+                                LegalEntityDeletionFieldSetMapper.LE_DELETION_FLAG
+                        )
+                        .fieldSetMapper(new LegalEntityDeletionFieldSetMapper())
+                        .linesToSkip(1)
+                        .build();
+
+        reader.setRecordSeparatorPolicy(new SkipCounterLinePolicy());
+        return reader;
+    }
+    @Bean
+    public LEDeletionEnrichmentProcessor leDeletionEnrichmentProcessor() {
+        return new LEDeletionEnrichmentProcessor(mappingDAO, legalEntityDeletionDAO, taskletLeDeletionDomainWrapper, errorLogDAO);
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<LegalEntityDeletionDomain> legalEntityDeletionWriter(DataSource dataSource) {
+        String sql = "INSERT INTO DD_LEGALENTITY_DELETE_TBL (LE_DELETION_FLAG, DD_UUID, FILE_ID, CREATED_BY, CREATED_TS) " +
+                "VALUES (:leDeletionFlag, :ddUuid, :fileId, 'DD_USER', SYSTIMESTAMP)";
+        return new JdbcBatchItemWriterBuilder<LegalEntityDeletionDomain>()
+                .sql(sql)
+                .beanMapped()
+                .dataSource(dataSource)
+                .build();
+    }
+
+    @Bean
+    public Step legalEntityDeletionEnrichStep(JobRepository jobRepository,
+                                              PlatformTransactionManager transactionManager,
+                                              FlatFileItemReader<LegalEntityDeletionDomain> legalEntityDeletionReader,
+                                              LEDeletionEnrichmentProcessor leDeletionEnrichmentProcessor,
+                                              JdbcBatchItemWriter<LegalEntityDeletionDomain> legalEntityDeletionWriter) {
+        return new StepBuilder(COFACE_LE_DELETION_BATCH_STEP_NAME, jobRepository)
+                .<LegalEntityDeletionDomain, LegalEntityDeletionDomain>chunk(100, transactionManager)
+                .reader(legalEntityDeletionReader())
+                .processor(leDeletionEnrichmentProcessor)
+                .writer(legalEntityDeletionWriter)
+                .listener((StepExecutionListener) leDeletionEnrichmentProcessor)
+                .listener(new ChunkListener() {
+                    @Override
+                    public void afterChunk(ChunkContext context) {
+                        leDeletionEnrichmentProcessor.flushRecords();
+                    }
+                })
+                .faultTolerant()
+                .skip(FlatFileParseException.class)
+                .skipLimit(100)
+                .retryLimit(3)
+                .retry(Exception.class)
+                .noRetry(FlatFileParseException.class)
+                .build();
+    }
+
+    @Bean
+    public Step leDeletionApiTaskletStep(JobRepository jobRepository,
+                                         PlatformTransactionManager transactionManager,
+                                         LEDeletionApiTasklet leDeletionApiTasklet) {
+        return new StepBuilder(LE_DELETION_API_TASKLET_STEP, jobRepository)
+                .tasklet(leDeletionApiTasklet, transactionManager)
+                .build();
+    }
+
+    @Bean(name = "LegalEntityDeletionJob")
+    public Job legalEntityDeletionJob(JobRepository jobRepository,
+                                      Step legalEntityDeletionEnrichStep,
+                                      Step leDeletionApiTaskletStep) {
+        log.info("LegalEntityDeletionJob job started");
+        return new JobBuilder(COFACE_LE_DELETION_BATCH_JOB_NAME, jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(legalEntityDeletionEnrichStep)
+                .next(leDeletionApiTaskletStep)
+                .build();
+    }
+    // Legal Entity Deletion batch config End ----------------------------------------------------------------------------------------
+
+
+    // Read File from ECS/Local-folder --------------------------------------------------------------------------------------
+    private Resource getFileForLocalRun(String fileFrom, String fileName, String fileId) {
+        Resource resource = null;
+        log.info("DD_Data_Distributor Read File from {}, filename:{}", fileFrom, fileName);
+        if (fileFrom.equalsIgnoreCase("ECS")) {
+            resource = fileProviderService.getFile(bucketName, fileName);
+        } else if (fileName.equalsIgnoreCase(cofaceLEChildFileName)) {
+            resource = resourceLEChildFile;
+        } else if (fileName.equalsIgnoreCase(cofaceLEParentFileName)) {
+            resource = resourceLEParentFile;
+        } else if (fileName.equalsIgnoreCase(cofaceOUFileName)) {
+            resource = resourceOUFile;
+        } else if (fileName.equalsIgnoreCase(cofaceIncapablesFileName)) {
+            resource = resourceIncapablesFile;
+        } else if (fileName.equalsIgnoreCase(cofaceLEDeleteFileName)) {
+            resource = resourceLEDeleteFile;
+        } else {
+            log.error("DD_Data_Distributor Unknown File Name {}", fileName);
+            return null;
+        }
+        log.info("DD_Data_Distributor File Downloaded Successfully...!");
+        fileIngestionService.updateTotalNumberOfRecords(fileId, resource);
+        return resource;
+    }
+
+    public void logDataRetentionSchedulerStatus(DataRetentionConfig dataRetentionConfig) {
+        boolean isRetentionJobEnabled = dataRetentionConfig.isEnabled();
+        dataRetentionConfig.logRetentionJobStatus(isRetentionJobEnabled);
+    }
+
+    public class SkipCounterLinePolicy extends DefaultRecordSeparatorPolicy {
+
+        @Override
+        public String preProcess(String record) {
+            if (record == null) return null;
+
+            String trimmed = record.trim();
+
+            if (trimmed.isEmpty()) {
+                return "";
             }
-        } catch (Exception e) {
-            log.error("CsvTotalRecordsParser: Error reading total records from file {}, error: {}", filePath, e.getMessage());
-        }
-        return 0L;
-    }
 
-    /**
-     * Get the last line from a file
-     * @param filePath Path to the file
-     * @return Last line content or null if file is empty
-     */
-    private static String getLastLineFromFile(String filePath) throws IOException {
-        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            String lastLine = null;
-            while ((line = br.readLine()) != null) {
-                lastLine = line;
+            if (trimmed.matches("^\\d{1,2}/\\d{1,2}/\\d{4}.*")) {
+                return "";
             }
-            return lastLine;
-        }
-    }
 
-    /**
-     * Get file size in bytes
-     * @param filePath Path to the file
-     * @return File size in bytes
-     */
-    public static Long getFileSizeInBytes(String filePath) {
-        try {
-            return Files.size(Paths.get(filePath));
-        } catch (IOException e) {
-            log.error("CsvTotalRecordsParser: Error getting file size for {}, error: {}", filePath, e.getMessage());
-            return 0L;
+            String cleaned = trimmed.replace(",", "")
+                    .replace("\"", "")
+                    .trim();
+
+            if (!cleaned.isEmpty() && cleaned.matches("^[0-9]+$")) {
+                return "";
+            }
+
+            return record;
         }
-    }
-}
+    }}
